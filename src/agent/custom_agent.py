@@ -8,11 +8,12 @@ import json
 import logging
 import pdb
 import traceback
-from typing import Optional, Type
+from typing import Optional, Type, List, Any, Union
 from PIL import Image, ImageDraw, ImageFont
 import os
 import base64
 import io
+from PIL.ImageFont import FreeTypeFont
 
 from browser_use.agent.prompts import SystemPrompt
 from browser_use.agent.service import Agent
@@ -21,10 +22,11 @@ from browser_use.agent.views import (
     AgentHistoryList,
     AgentOutput,
     AgentHistory,
+    AgentStepInfo,
 )
 from browser_use.browser.browser import Browser
 from browser_use.browser.context import BrowserContext
-from browser_use.browser.views import BrowserStateHistory
+from browser_use.browser.views import BrowserState, BrowserStateHistory
 from browser_use.controller.service import Controller
 from browser_use.telemetry.views import (
     AgentEndTelemetryEvent,
@@ -33,11 +35,9 @@ from browser_use.telemetry.views import (
 )
 from browser_use.utils import time_execution_async
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import (
-    BaseMessage,
-)
+from langchain_core.messages import BaseMessage
 from src.utils.agent_state import AgentState
-
+from .custom_prompts import CustomAgentMessagePrompt
 from .custom_massage_manager import CustomMassageManager
 from .custom_views import CustomAgentOutput, CustomAgentStepInfo
 
@@ -96,7 +96,7 @@ class CustomAgent(Agent):
             tool_call_in_content=tool_call_in_content,
         )
         self.add_infos = add_infos
-        self.agent_state = agent_state
+        self.agent_state = agent_state or self._create_empty_state()
         self.message_manager = CustomMassageManager(
             llm=self.llm,
             task=self.task,
@@ -108,6 +108,15 @@ class CustomAgent(Agent):
             max_actions_per_step=self.max_actions_per_step,
             tool_call_in_content=tool_call_in_content,
         )
+        self._browser_state = None  # Initialize browser_state
+
+    @property
+    def browser_state(self) -> Optional[BrowserState]:
+        return self._browser_state
+
+    @browser_state.setter
+    def browser_state(self, value: Optional[BrowserState]) -> None:
+        self._browser_state = value
 
     def _setup_action_models(self) -> None:
         """Setup dynamic action models from controller's registry"""
@@ -136,8 +145,10 @@ class CustomAgent(Agent):
             )
 
     def update_step_info(
-            self, model_output: CustomAgentOutput, step_info: CustomAgentStepInfo = None
-    ):
+            self, 
+            model_output: Union[CustomAgentOutput, AgentOutput], 
+            step_info: Optional[CustomAgentStepInfo] = None
+    ) -> None:
         """
         update step info
         """
@@ -222,6 +233,14 @@ class CustomAgent(Agent):
         except Exception as e:
             result = self._handle_step_error(e)
             self._last_result = result
+            message_prompt = CustomAgentMessagePrompt(
+                state=self.browser_state,
+                result=result,
+                include_attributes=self.include_attributes,
+                max_error_length=self.max_error_length,
+                step_info=step_info,
+            )
+            user_message = message_prompt.get_user_message()
 
         finally:
             if not result:
